@@ -180,6 +180,7 @@ table.stubt{width:100%;border-collapse:collapse;font-size:13px}
 .conf.yes{background:var(--accent-soft);color:var(--accent)}
 .conf.no{background:var(--warn-soft);color:var(--warn)}
 .dwres td.basis{font-size:13px;color:var(--muted);min-width:260px;padding:6px}
+.dw-status.warn{color:var(--warn)}
 .dw-notes{margin:0;padding-left:20px;color:var(--muted);font-size:13px;display:flex;flex-direction:column;gap:3px}
 .banner.info{background:var(--accent-soft)}
 .banner .btn{margin-left:6px}
@@ -572,11 +573,32 @@ function restoreConfirm(){
   return `<div class="banner"><b>Restore this backup?</b> It has ${n} pay period${n===1?"":"s"}, ${(o.installers||[]).length} installers and ${(o.rates||[]).length} rates${o.savedAt?", saved "+new Date(o.savedAt).toLocaleString():""}. It replaces everything currently in this browser.
     <div class="row" style="margin-top:8px"><button class="btn primary" data-act="restore-yes" type="button">Replace with backup</button><button class="btn ghost" data-act="restore-no" type="button">Cancel</button></div></div>`;
 }
+async function saveTravel(){
+  const c=travelCfg(); const origin=$("#trOrigin").value.trim()||"46202";
+  const next={...c, origin, threshold:Math.max(1,num($("#trThresh").value)||50), tripQty:Math.max(0,num($("#trTripQty").value)), milesMode:$("#trMiles").value};
+  if(origin!==c.origin){
+    try{ const g=/^\d{5}$/.test(origin)
+        ? await (await fetch("https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=us&postalcode="+origin)).json().then(j=>j[0]?{lat:+j[0].lat,lon:+j[0].lon}:null)
+        : await geocode(origin);
+      if(!g){ toast("Couldn't find that shop location on the map — travel settings not saved."); return; }
+      next.lat=g.lat; next.lon=g.lon;
+    }catch(e){ toast("Map lookup failed — check your connection and save again."); return; }
+  }
+  lsSet(TRAVELSTORE, JSON.stringify(next)); render(); toast("Travel settings saved");
+}
 function renderSettings(){
   const d=daysSinceBackup();
   return `<div class="setup-grid"><section class="panel"><div class="panel-head"><div><h2>Backup &amp; restore</h2><div class="hint">Payroll is saved in this browser on this computer. A backup file lets you move it to another computer or recover it.</div></div></div>
     <div class="dw-body"><div class="row"><button class="btn primary" data-act="backup" type="button">Download backup</button><button class="btn" data-act="restore-pick" type="button">Restore from backup…</button>
     <span class="hint">${d===null?"No backup downloaded yet.":"Last backup: "+(d===0?"today":d+" day"+(d===1?"":"s")+" ago")+"."}</span></div></div></section>
+  <section class="panel"><div class="panel-head"><div><h2>Travel pay</h2><div class="hint">When drawings are read, the job site's driving distance from the shop decides the travel line.</div></div></div>
+    <div class="dw-body"><div class="dw-form">${(()=>{ const c=travelCfg(); return `
+      <label>Shop ZIP or address<input id="trOrigin" value="${esc(c.origin)}"></label>
+      <label>Mileage starts at<input id="trThresh" type="number" min="1" value="${c.threshold}" style="width:90px"> mi</label>
+      <label>Trip charges per local job<input id="trTripQty" type="number" min="0" step="1" value="${c.tripQty}" style="width:90px"></label>
+      <label>Miles paid<select id="trMiles"><option value="oneway" ${c.milesMode==="oneway"?"selected":""}>One-way</option><option value="round" ${c.milesMode==="round"?"selected":""}>Round trip</option></select></label>
+      <button class="btn primary" data-act="save-travel" type="button">Save</button>`; })()}</div>
+      <div class="hint">Under the limit: Trip line at the rate-card price. At or over: Miles line at the rate-card price per mile. Distances come from OpenStreetMap.</div></div></section>
   <section class="panel"><div class="panel-head"><div><h2>Reading drawings</h2><div class="hint">Uses your own Claude API key from console.anthropic.com. The key is saved only in this browser — never in the code on GitHub.</div></div></div>
     <div class="dw-body"><div class="dw-form">
       <label class="grow">Claude API key<input type="password" id="apiKey" autocomplete="off" placeholder="sk-ant-..." value="${esc(S.apiKey)}"></label>
@@ -702,14 +724,15 @@ How to read the drawings:
 - Mark an item "confirmed": true ONLY when its size or count is called out directly on the drawings (a dimension string or leader with a number, or a schedule quantity). If you measured it from scale, inferred it, or read it from only a partial view, set "confirmed": false and say so in "basis".
 - Linear-foot tasks: the canopy/awning length along the wall, in feet (convert 24'-6" to 24.5). Add up units of the same kind. Count tasks: whole numbers.
 - Include companion work the scope obviously needs (for wall-mounted canopies, Caulk footage equal to the length along the wall). For recovers of existing awnings, the usual set is Takedown, Skin, Rehang and Caulk.
-- Do NOT include Trip, Miles, Delivery, hours or per diem — those are not on drawings.
+- Do NOT include Trip, Miles, Delivery, hours or per diem as items — the office figures travel from the site address.
+- Find the PROJECT SITE street address (where the work is, not the architect's or owner's office) on the cover sheet, title block or site plan and return it in "address" as "street, city, ST ZIP". If only the city is shown, return "city, ST".
 - If something has no matching task, use task "OTHER" and describe it in basis.
 
 Pay tasks (use these names exactly):
 ${tasks}
 
 Reply with only JSON in this shape:
-{"project":"project name from the title block","location":"City ST","jobNumber":"","items":[{"task":"Install Canopy","qty":24.5,"sheet":"A-201","basis":"North elevation: canopy dimensioned 24'-6\\"","confirmed":true}],"notes":["anything the office should double-check"]}
+{"project":"project name from the title block","location":"City ST","address":"123 Main St, Plainfield, IN 46168","jobNumber":"","items":[{"task":"Install Canopy","qty":24.5,"sheet":"A-201","basis":"North elevation: canopy dimensioned 24'-6\\"","confirmed":true}],"notes":["anything the office should double-check"]}
 If you cannot find any canopy or awning scope on these sheets, return an empty items array and explain in notes.`;
 }
 
@@ -723,7 +746,7 @@ async function readDrawings(){
     dw.stage=`Reading ${sel.length} sheet${sel.length>1?"s":""}… this usually takes one to three minutes.`; render();
     const out=await callClaude(drawingPrompt(desc),blobs,dw.ctl.signal);
     const items=Array.isArray(out?.items)?out.items:[];
-    dw.results={notes:Array.isArray(out?.notes)?out.notes.map(String):[], items:items.map(it=>{
+    dw.results={travel:{address:String(out?.address||"").trim(),status:"",msg:""}, notes:Array.isArray(out?.notes)?out.notes.map(String):[], items:items.filter(it=>!/^(trip|miles?|delivery)$/i.test(String(it.task||"").trim())).map(it=>{
       const r=S.rates.find(x=>x.task.toLowerCase()===String(it.task||"").toLowerCase());
       return {task:r?r.task:"", other:r?"":String(it.task||""), qty:num(it.qty), sheet:String(it.sheet||""), basis:String(it.basis||""), confirmed:!!it.confirmed, include:!!r && num(it.qty)>0};
     })};
@@ -737,6 +760,42 @@ async function readDrawings(){
       invalid_json:"The answer came back incomplete. Click Read drawings again, or pick fewer sheets."}[c];
     dw.err = msg===undefined ? ("Reading failed: "+((e&&e.message)||"unknown error")+". Try again.") : msg;
   }finally{ dw.busy=false; dw.ctl=null; render(); }
+  if(S.dw.results) computeTravel();
+}
+
+/* ---------- travel: trip charge vs mileage from the shop ---------- */
+const TRAVELSTORE="sommer-installer-pay-travel";
+function travelCfg(){ let c={}; try{ c=JSON.parse(lsGet(TRAVELSTORE)||"{}"); }catch(e){} return Object.assign({origin:"46202",lat:39.7846,lon:-86.1570,threshold:50,tripQty:2,milesMode:"oneway"},c); }
+async function geocode(q){
+  const r=await fetch("https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=us&q="+encodeURIComponent(q));
+  const j=await r.json(); return j&&j[0]?{lat:+j[0].lat,lon:+j[0].lon,name:j[0].display_name}:null;
+}
+function crowMiles(a,b){ const R=3958.8,t=x=>x*Math.PI/180; const dLa=t(b.lat-a.lat), dLo=t(b.lon-a.lon);
+  const h=Math.sin(dLa/2)**2+Math.cos(t(a.lat))*Math.cos(t(b.lat))*Math.sin(dLo/2)**2; return 2*R*Math.asin(Math.sqrt(h)); }
+async function driveMiles(o,d){
+  try{ const r=await fetch(`https://router.project-osrm.org/route/v1/driving/${o.lon},${o.lat};${d.lon},${d.lat}?overview=false`); const j=await r.json();
+    if(j&&j.routes&&j.routes[0]) return {miles:j.routes[0].distance/1609.34,est:false}; }catch(e){}
+  return {miles:crowMiles(o,d)*1.2,est:true};
+}
+async function computeTravel(){
+  const R=S.dw.results; if(!R||!R.travel) return; const T=R.travel; const cfg=travelCfg();
+  R.items=R.items.filter(it=>!it.travel);
+  if(!T.address.trim()){ T.status="err"; T.msg="No job site address found on these sheets. Type it in and click Figure travel."; render(); return; }
+  T.status="busy"; T.msg=`Figuring the drive from ${cfg.origin}…`; render();
+  try{
+    let d=await geocode(T.address);
+    if(!d){ const m=T.address.match(/([A-Za-z .'-]+),\s*([A-Z]{2})\b\s*(\d{5})?/); if(m) d=await geocode(`${m[1].trim()}, ${m[2]}${m[3]?" "+m[3]:""}`); }
+    if(!d){ T.status="err"; T.msg="Couldn't find that address on the map. Check it, or type just the city and state, then click Figure travel."; render(); return; }
+    const {miles,est}=await driveMiles({lat:cfg.lat,lon:cfg.lon},d);
+    const one=Math.round(miles), local=one<cfg.threshold;
+    const rate=S.rates.find(r=>r.task===(local?"Trip":"Miles"));
+    const qty=local?num(cfg.tripQty):(cfg.milesMode==="round"?one*2:one);
+    const place=d.name.split(",").slice(0,3).join(",").trim();
+    const how=`${est?"About ":""}${one} mi one-way from ${cfg.origin} to ${place}${est?" (straight-line estimate — map route unavailable, check it)":" by road"}: ${local?`under ${cfg.threshold} mi, so trip charge × ${qty}`:`${cfg.threshold} mi or more, so mileage (${cfg.milesMode==="round"?"round trip":"one-way"})`}`;
+    R.items.push({task:rate?rate.task:"", other:rate?"":(local?"Trip":"Miles"), qty, sheet:"", basis:how, confirmed:!est, include:!!rate, travel:true});
+    T.status="ok"; T.msg=how;
+  }catch(e){ T.status="err"; T.msg="The map lookup failed. Check your internet connection and click Figure travel again."; }
+  render();
 }
 
 function renderDrawings(p){
@@ -757,22 +816,25 @@ function renderDrawings(p){
   if(dw.busy) h+=`<div class="dw-status"><span class="spin" aria-hidden="true"></span>${esc(dw.stage||"Working…")}</div>`;
   if(dw.err) h+=`<div class="banner">${esc(dw.err)}</div>`;
   if(dw.results){
-    const R=dw.results;
-    if(!R.items.length) h+=`<div class="banner">No canopy or awning scope found on those sheets.</div>`;
-    else {
+    const R=dw.results; const T=R.travel||{address:"",msg:""};
+    h+=`<div class="dw-form travel"><label class="grow">Job site address (sets trip charge or mileage)<input id="dwAddr" data-dw="addr" value="${esc(T.address)}" placeholder="Street, City, ST ZIP"></label>
+      <button class="btn" data-act="dw-travel" type="button" ${T.status==="busy"?"disabled":""}>Figure travel</button></div>
+      ${T.msg?`<div class="dw-status ${T.status==="err"?"warn":""}">${T.status==="busy"?`<span class="spin" aria-hidden="true"></span>`:""}${esc(T.msg)}</div>`:""}`;
+    if(!R.items.some(it=>!it.travel)) h+=`<div class="banner">No canopy or awning scope found on those sheets.</div>`;
+    if(R.items.length){
       h+=`<div class="tablewrap"><table class="grid dwres"><thead><tr><th style="width:34px"></th><th style="width:190px">Task</th><th class="r w-qty">Qty</th><th class="r w-rate">Rate</th><th class="r" style="width:100px">Crew amt</th><th style="width:150px">Source</th><th>How it was measured</th></tr></thead><tbody>`;
       R.items.forEach((it,i)=>{ const r=S.rates.find(x=>x.task===it.task);
         h+=`<tr data-dwi="${i}"><td><input type="checkbox" data-dwr="include" ${it.include?"checked":""} style="width:auto" aria-label="Include"></td>
           <td><select data-dwr="task"><option value="">${it.other?esc("Not on rate card: "+it.other):"Pick a task"}</option>${S.rates.map(x=>`<option ${x.task===it.task?"selected":""}>${esc(x.task)}</option>`).join("")}</select></td>
           <td><input class="n" data-dwr="qty" inputmode="decimal" value="${it.qty}"></td><td class="amt">${r?money(r.rate):"—"}</td><td class="amt">${r?money(r.rate*num(it.qty)):"—"}</td>
-          <td style="white-space:nowrap"><span class="conf ${it.confirmed?"yes":"no"}">${it.confirmed?"Called out":"Estimated"}</span>${it.sheet?` <span class="hint">${esc(it.sheet)}</span>`:""}</td>
+          <td style="white-space:nowrap">${it.travel?`<span class="conf ${it.confirmed?"yes":"no"}">${it.confirmed?"Map":"Map, estimated"}</span>`:`<span class="conf ${it.confirmed?"yes":"no"}">${it.confirmed?"Called out":"Estimated"}</span>`}${it.sheet?` <span class="hint">${esc(it.sheet)}</span>`:""}</td>
           <td class="basis">${esc(it.basis)}</td></tr>`; });
       h+=`</tbody></table></div>`;
     }
     if(R.notes.length) h+=`<ul class="dw-notes">${R.notes.map(n=>`<li>${esc(n)}</li>`).join("")}</ul>`;
     const n=R.items.filter(it=>it.include&&it.task).length;
     if(R.items.length) h+=`<div class="row"><button class="btn primary" data-act="dw-add" type="button" ${n&&dw.crewId?"":"disabled"}>Add ${n} line${n===1?"":"s"} to ${esc(p.crews.find(c=>c.id===dw.crewId)?.name||"crew")}</button>
-      <span class="hint">"Estimated" means the size wasn't dimensioned on the sheet — check it against the field measure before you pay. Trips and miles aren't on drawings; add those yourself.</span></div>`;
+      <span class="hint">"Estimated" means the size wasn't dimensioned on the sheet — check it against the field measure before you pay. Travel comes from the site address — multi-stop road trips still need miles entered by hand.</span></div>`;
   }
   return h+`</div></section>`;
 }
@@ -784,6 +846,7 @@ function findCrew(el){ const cs=el.closest("[data-crew]"); return cs && period()
 document.addEventListener("input",e=>{
   const t=e.target; const p=period();
   if(t.dataset.dw==="job"||t.dataset.dw==="loc"){ S.dw[t.dataset.dw]=t.value; return; }
+  if(t.dataset.dw==="addr"){ if(S.dw.results&&S.dw.results.travel) S.dw.results.travel.address=t.value; return; }
   if(t.dataset.dwr==="qty"){ const i=+t.closest("[data-dwi]").dataset.dwi; const it=S.dw.results.items[i]; it.qty=num(t.value);
     const r=S.rates.find(x=>x.task===it.task); const cells=t.closest("tr").querySelectorAll(".amt"); if(r&&cells[1]) cells[1].textContent=money(r.rate*it.qty); return; }
   if(t.dataset.lf){ const {l}=findLine(t); if(!l) return; const f=t.dataset.lf;
@@ -843,6 +906,8 @@ document.addEventListener("click",e=>{
     case "restore-pick": $("#restoreFile").click(); break;
     case "restore-yes": loadData(S.pendingRestore); S.pendingRestore=null; S.firstRun=false; persist(); lsSet(BKSTORE,new Date().toISOString()); render(); toast("Backup restored"); break;
     case "restore-no": S.pendingRestore=null; render(); break;
+    case "dw-travel": computeTravel(); break;
+    case "save-travel": saveTravel(); break;
     case "save-key": { const k=$("#apiKey").value.trim(); S.apiKey=k; S.model=$("#apiModel").value; lsSet(KEYSTORE,k); lsSet(MODELSTORE,S.model); S.dwAvail=!!k; render(); toast(k?"API key saved in this browser":"Key cleared"); break; }
     case "clear-key": S.apiKey=""; lsDel(KEYSTORE); S.dwAvail=false; render(); toast("API key removed"); break;
     case "dw-close": if(S.dw.ctl) S.dw.ctl.abort(); S.dw.open=false; render(); break;
