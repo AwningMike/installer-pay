@@ -180,6 +180,8 @@ table.stubt{width:100%;border-collapse:collapse;font-size:13px}
 .conf.yes{background:var(--accent-soft);color:var(--accent)}
 .conf.no{background:var(--warn-soft);color:var(--warn)}
 .dwres td.basis{font-size:13px;color:var(--muted);min-width:260px;padding:6px}
+.qlrec summary{cursor:pointer;font-weight:600;padding:10px 0;color:var(--accent)}
+.ql td.basis{font-size:13px;color:var(--muted);padding:6px}
 .dw-status.warn{color:var(--warn)}
 .dw-notes{margin:0;padding-left:20px;color:var(--muted);font-size:13px;display:flex;flex-direction:column;gap:3px}
 .banner.info{background:var(--accent-soft)}
@@ -270,11 +272,69 @@ function lsSet(k,v){ try{ localStorage.setItem(k,v); return true; }catch(e){ ret
 function lsDel(k){ try{ localStorage.removeItem(k); }catch(e){} }
 let saveT=null;
 function markSaving(txt){ const el=$("#saveState"); if(el) el.textContent = txt || (S.mode==="local"?"Saved on this computer":"Not saving — see note"); }
-function snapshot(){ return {app:"sommer-installer-pay",version:1,savedAt:new Date().toISOString(),rates:S.rates,installers:S.installers,periods:S.periods}; }
+function snapshot(){ return {app:"sommer-installer-pay",version:1,savedAt:new Date().toISOString(),rates:S.rates,installers:S.installers,periods:S.periods,quoteLabor:S.quoteLabor}; }
+
+/* ---------- labor cost feed for the Quote Builder ----------
+   Both apps live on awningmike.github.io, so they share localStorage. Every save writes a compact
+   feed to LABORFEED that the Quote Builder reads to put real installer cost into its margins. */
+const LABORFEED="sommer-installer-pay-labor";
+const QL_PRODUCTS=[["canopy","Metal canopy (8\" / 12\" face)"],["sunshade","Sunshade"],["standingSeam","Standing seam awning"],["fabric","Fabric awning"],["recover","Recover"],["patio","Patio canopy"],["patiorailing","Patio railing"]];
+function defaultQuoteLabor(){
+  const r=(product,task,perFt,perUnit=0)=>({id:uid("q"),product,task,perFt,perUnit});
+  return {crew:"", recipes:[
+    r("canopy","Install Canopy",1), r("canopy","Caulk",1), r("canopy","Arms",0.15),
+    r("sunshade","Install Canopy",1),
+    r("standingSeam","Install Canopy",1), r("standingSeam","Caulk",1),
+    r("fabric","Install Base",1), r("fabric","Caulk",1),
+    r("recover","Takedown",1), r("recover","Skin",1), r("recover","Rehang",1), r("recover","Caulk",1),
+    r("patio","Install Canopy",1), r("patio","Posts - Above Ground",0,2) ]};
+}
+function latestCrews(){ const p=S.periods[sortedPeriodIds()[0]]; return p?(p.crews||[]):[]; }
+function crewMults(c){
+  const lab=c.members.reduce((s,m)=>s+num(m.share)+num(m.bonus),0)/100;
+  const trav=c.members.reduce((s,m)=>s+num(m.share)+(m.bonusTravel?num(m.bonus):0),0)/100;
+  return {laborMult:Math.round(lab*10000)/10000, travelMult:Math.round(trav*10000)/10000};
+}
+function quoteCrew(){ const cs=latestCrews(); return cs.find(c=>c.name===S.quoteLabor.crew)||cs[0]||null; }
+function recipeCrewPerFt(product){ // rate-card $ per ft of width (perUnit items excluded)
+  return S.quoteLabor.recipes.filter(x=>x.product===product).reduce((s,x)=>{ const r=S.rates.find(y=>y.task===x.task); return s+(r?num(r.rate)*num(x.perFt):0); },0);
+}
+function recipeCrewPerUnit(product){
+  return S.quoteLabor.recipes.filter(x=>x.product===product).reduce((s,x)=>{ const r=S.rates.find(y=>y.task===x.task); return s+(r?num(r.rate)*num(x.perUnit):0); },0);
+}
+function jobActuals(){
+  const out={};
+  Object.values(S.periods).forEach(p=>{
+    const add=(job,loc,amt,kind)=>{ const k=String(job||"").trim(); if(!k) return; const o=out[k]=out[k]||{loc:"",labor:0,travel:0,other:0,total:0,periods:[]};
+      if(!o.loc&&loc) o.loc=loc; o[kind]+=amt; o.total+=amt; if(!o.periods.includes(p.end)) o.periods.push(p.end); };
+    (p.crews||[]).forEach(c=>c.lines.forEach(l=>{ const amt=c.members.reduce((s,m)=>s+memberPay(l,m,c),0); add(l.job,l.loc,amt,l.type==="Labor"?"labor":l.type==="Travel"?"travel":"other"); }));
+    (p.extras||[]).forEach(x=>add(x.job,"",extraAmt(x),"other"));
+  });
+  Object.values(out).forEach(o=>{ ["labor","travel","other","total"].forEach(k=>o[k]=Math.round(o[k]*100)/100); });
+  return out;
+}
+function writeLaborFeed(){
+  try{
+    const qc=quoteCrew(); const tc=travelCfg();
+    const rates={}; S.rates.forEach(r=>rates[r.task]={rate:num(r.rate),unit:r.unit,type:r.type});
+    const crews=latestCrews().map(c=>({name:c.name, members:c.members.map(m=>iname(m.id)), ...crewMults(c)}));
+    const products={};
+    QL_PRODUCTS.forEach(([k,label])=>{ const items=S.quoteLabor.recipes.filter(x=>x.product===k).map(x=>({task:x.task,perFt:num(x.perFt),perUnit:num(x.perUnit),rate:num((S.rates.find(y=>y.task===x.task)||{}).rate)}));
+      const m=qc?crewMults(qc).laborMult:1;
+      products[k]={label, items, crewAmtPerFt:Math.round(recipeCrewPerFt(k)*100)/100, crewAmtPerUnit:Math.round(recipeCrewPerUnit(k)*100)/100,
+        costPerFt:Math.round(recipeCrewPerFt(k)*m*100)/100, costPerUnit:Math.round(recipeCrewPerUnit(k)*m*100)/100}; });
+    const feed={app:"sommer-installer-pay",feed:"labor",version:1,updatedAt:new Date().toISOString(),
+      howTo:"installerCost = sum over recipe items of rate x (perFt x widthFt x qty + perUnit x qty), times crew.laborMult. Travel: one-way road miles from travel.origin; under travel.threshold -> tripQty x rates.Trip.rate, else miles (one-way, or x2 if milesMode=round) x rates.Miles.rate; times crew.travelMult.",
+      defaultCrew:qc?qc.name:"", crews, rates, products,
+      travel:{origin:tc.origin,lat:tc.lat,lon:tc.lon,threshold:tc.threshold,tripQty:tc.tripQty,milesMode:tc.milesMode},
+      jobActuals:jobActuals()};
+    lsSet(LABORFEED, JSON.stringify(feed));
+  }catch(e){}
+}
 function persist(){
   markSaving("Saving…");
   clearTimeout(saveT); saveT=setTimeout(()=>{
-    const ok=lsSet(STORE, JSON.stringify(snapshot()));
+    const ok=lsSet(STORE, JSON.stringify(snapshot())); writeLaborFeed();
     if(!ok){ S.mode="nostore"; markSaving(); toast("Couldn't save in this browser — download a backup now so nothing is lost."); render(); }
     else markSaving();
   },300);
@@ -287,7 +347,12 @@ const queue = (path)=>persist();   // period deletes etc.
 function loadData(obj){
   S.rates=Array.isArray(obj.rates)?obj.rates:[]; S.installers=Array.isArray(obj.installers)?obj.installers:[];
   S.periods=(obj.periods&&typeof obj.periods==="object")?obj.periods:{};
-  S.cur=sortedPeriodIds()[0]||null; refreshTaskList();
+  S.quoteLabor=(obj.quoteLabor&&Array.isArray(obj.quoteLabor.recipes))?obj.quoteLabor:defaultQuoteLabor();
+  // Undo the short-lived "% of job" split version: crews it marked get the installer's normal share + bonus back.
+  let undone=false;
+  Object.values(S.periods).forEach(p=>(p.crews||[]).forEach(c=>{ if(c.mode){ const was=c.mode; delete c.mode; undone=true;
+    if(was==="po") c.members.forEach(m=>{ const i=S.installers.find(x=>x.id===m.id); if(i){ m.share=num(i.share); m.bonus=num(i.bonus); m.bonusTravel=!!i.bonusTravel; } }); } }));
+  S.cur=sortedPeriodIds()[0]||null; refreshTaskList(); if(undone) S._undone=true;
 }
 function defaultData(){
   const r=(task,rate,unit,type,notes="")=>({id:uid("r"),task,rate,unit,type,notes});
@@ -306,7 +371,7 @@ function boot(){
   const raw=lsGet(STORE);
   if(raw){ try{ loadData(JSON.parse(raw)); }catch(e){ toast("Saved data couldn't be read — restore your latest backup."); loadData(defaultData()); } }
   else { S.firstRun=true; loadData(defaultData()); }
-  render(); markSaving();
+  render(); markSaving(); if(S._undone){ S._undone=false; persist(); } else writeLaborFeed();
 }
 function sortedPeriodIds(){ return Object.keys(S.periods).sort((a,b)=>(S.periods[b].end||"").localeCompare(S.periods[a].end||"")); }
 function refreshTaskList(){ $("#taskList").innerHTML = S.rates.map(r=>`<option value="${esc(r.task)}">`).join(""); }
@@ -372,11 +437,13 @@ function render(){
   else if(S.firstRun && !Object.keys(S.periods).length) h+=`<div class="banner info"><b>Welcome.</b> If you have a backup file, restore it to bring in your installers, rates and pay periods. <button class="btn" data-act="restore-pick" type="button">Restore a backup</button> Or set up installers under Settings and start a new period.</div>`;
   else { const d=daysSinceBackup(); if(Object.keys(S.periods).length && (d===null || d>=14)) h+=`<div class="banner"><b>${d===null?"No backup yet.":"Last backup was "+d+" days ago."}</b> Payroll is only saved in this browser — download a backup so a cleared browser or new computer doesn't lose it. <button class="btn" data-act="backup" type="button">Download backup</button></div>`; }
   if(S.newPeriodOpen) h+=newPeriodForm();
-  if(S.tab==="setup") h+=renderSettings()+renderSetup();
+  if(S.tab==="setup") h+=renderSettings()+renderQuoteLabor()+renderSetup();
   else if(!period()) h+=`<div class="panel empty">No pay periods yet. Use <b>+ New period</b> at the top to start one.</div>`;
   else if(S.tab==="entry") h+=renderEntry();
   else h+=renderStubs();
+  const qlOpen=!!document.querySelector(".qlrec[open]");
   app.innerHTML=h;
+  if(qlOpen){ const d=document.querySelector(".qlrec"); if(d) d.open=true; }
 }
 
 function newPeriodForm(){
@@ -584,7 +651,29 @@ async function saveTravel(){
       next.lat=g.lat; next.lon=g.lon;
     }catch(e){ toast("Map lookup failed — check your connection and save again."); return; }
   }
-  lsSet(TRAVELSTORE, JSON.stringify(next)); render(); toast("Travel settings saved");
+  lsSet(TRAVELSTORE, JSON.stringify(next)); writeLaborFeed(); render(); toast("Travel settings saved");
+}
+function renderQuoteLabor(){
+  const cs=latestCrews(); const qc=quoteCrew(); const m=qc?crewMults(qc):{laborMult:1,travelMult:1};
+  let h=`<section class="panel ql"><div class="panel-head"><div><h2>Quote Builder labor</h2><div class="hint">What you actually pay installers per foot of each product. The Quote Builder (same website) reads this to show margin after install labor. Saved with your payroll backups.</div></div></div>
+    <div class="dw-body"><div class="dw-form">
+      <label>Crew to quote with<select id="qlCrew">${cs.map(c=>`<option ${qc&&c.name===qc.name?"selected":""}>${esc(c.name)}</option>`).join("")||"<option>No crews yet</option>"}</select></label>
+      <span class="hint">${qc?`${esc(qc.name)} pays out <b>${m.laborMult.toFixed(2)}×</b> the rate card on labor and <b>${m.travelMult.toFixed(2)}×</b> on trips/miles (everyone's share + bonuses, from the current period).`:""}</span></div>
+    <div class="tablewrap"><table class="grid"><thead><tr><th>Product</th><th class="r">Rate card $/ft</th><th class="r">Installer cost $/ft</th><th class="r">+ per unit</th><th>What the crew gets paid for</th></tr></thead><tbody>
+    ${QL_PRODUCTS.map(([k,label])=>{ const items=S.quoteLabor.recipes.filter(x=>x.product===k); const pf=recipeCrewPerFt(k), pu=recipeCrewPerUnit(k);
+      return `<tr><td><b>${esc(label)}</b></td><td class="amt">${money(pf)}</td><td class="amt"><b>${money(pf*m.laborMult)}</b></td><td class="amt">${pu?money(pu*m.laborMult):"—"}</td>
+        <td class="basis">${items.map(x=>`${esc(x.task)} ${x.perFt?`× ${x.perFt}/ft`:""}${x.perUnit?` ${x.perUnit}/unit`:""}`).join(" · ")||"<span class='hint'>nothing set — no labor cost counted</span>"}</td></tr>`; }).join("")}
+    </tbody></table></div>
+    <details class="qlrec"><summary>Edit what each product includes</summary>
+    <div class="tablewrap"><table class="grid"><thead><tr><th style="width:220px">Product</th><th style="width:200px">Task</th><th class="r w-qty">Per ft of width</th><th class="r w-qty">Per unit</th><th style="width:36px"></th></tr></thead><tbody>
+    ${S.quoteLabor.recipes.map(x=>`<tr data-ql="${x.id}"><td><select data-qf="product">${QL_PRODUCTS.map(([k,l])=>`<option value="${k}" ${k===x.product?"selected":""}>${esc(l)}</option>`).join("")}</select></td>
+      <td><select data-qf="task">${S.rates.filter(r=>r.type==="Labor").map(r=>`<option ${r.task===x.task?"selected":""}>${esc(r.task)}</option>`).join("")}</select></td>
+      <td><input class="n" data-qf="perFt" inputmode="decimal" value="${x.perFt}"></td><td><input class="n" data-qf="perUnit" inputmode="decimal" value="${x.perUnit}"></td>
+      <td><button class="btn ghost del" data-act="ql-del" type="button" aria-label="Remove">✕</button></td></tr>`).join("")}
+    </tbody></table></div>
+    <div class="row" style="padding:10px 0 0"><button class="btn" data-act="ql-add" type="button">+ Add task</button><span class="hint">Example: canopy Arms 0.15/ft ≈ one arm every 7 ft. Past jobs ran from 1 per 2.5 ft to 1 per 7 ft — set what's typical.</span></div>
+    </details></div></section>`;
+  return h;
 }
 function renderSettings(){
   const d=daysSinceBackup();
@@ -846,6 +935,7 @@ function findCrew(el){ const cs=el.closest("[data-crew]"); return cs && period()
 document.addEventListener("input",e=>{
   const t=e.target; const p=period();
   if(t.dataset.dw==="job"||t.dataset.dw==="loc"){ S.dw[t.dataset.dw]=t.value; return; }
+  if(t.dataset.qf==="perFt"||t.dataset.qf==="perUnit"){ const x=S.quoteLabor.recipes.find(y=>y.id===t.closest("[data-ql]").dataset.ql); x[t.dataset.qf]=num(t.value); persist(); return; }
   if(t.dataset.dw==="addr"){ if(S.dw.results&&S.dw.results.travel) S.dw.results.travel.address=t.value; return; }
   if(t.dataset.dwr==="qty"){ const i=+t.closest("[data-dwi]").dataset.dwi; const it=S.dw.results.items[i]; it.qty=num(t.value);
     const r=S.rates.find(x=>x.task===it.task); const cells=t.closest("tr").querySelectorAll(".amt"); if(r&&cells[1]) cells[1].textContent=money(r.rate*it.qty); return; }
@@ -866,6 +956,9 @@ document.addEventListener("input",e=>{
 document.addEventListener("change",e=>{
   const t=e.target; const p=period();
   if(t.id==="restoreFile"){ const f=t.files[0]; t.value=""; if(f) restoreFile(f); return; }
+  if(t.id==="qlCrew"){ S.quoteLabor.crew=t.value; persist(); render(); return; }
+  if(t.dataset.qf==="product"||t.dataset.qf==="task"){ const x=S.quoteLabor.recipes.find(y=>y.id===t.closest("[data-ql]").dataset.ql); x[t.dataset.qf]=t.value; persist(); render(); return; }
+  if((t.dataset.qf==="perFt"||t.dataset.qf==="perUnit")){ render(); return; }
   if(t.id==="apiModel"){ S.model=t.value; lsSet(MODELSTORE,S.model); return; }
   if(t.id==="dwFile"){ const fs=[...t.files]; t.value=""; if(fs.length) addDrawingFiles(fs); return; }
   if(t.dataset.dwpage){ const pg=S.dw.pages.find(x=>x.id===t.dataset.dwpage); pg.selected=t.checked; render(); return; }
@@ -908,6 +1001,8 @@ document.addEventListener("click",e=>{
     case "restore-no": S.pendingRestore=null; render(); break;
     case "dw-travel": computeTravel(); break;
     case "save-travel": saveTravel(); break;
+    case "ql-add": S.quoteLabor.recipes.push({id:uid("q"),product:"canopy",task:(S.rates.find(r=>r.type==="Labor")||{}).task||"",perFt:1,perUnit:0}); persist(); render(); document.querySelector(".qlrec").open=true; break;
+    case "ql-del": { const id=b.closest("[data-ql]").dataset.ql; S.quoteLabor.recipes=S.quoteLabor.recipes.filter(x=>x.id!==id); persist(); render(); document.querySelector(".qlrec").open=true; break; }
     case "save-key": { const k=$("#apiKey").value.trim(); S.apiKey=k; S.model=$("#apiModel").value; lsSet(KEYSTORE,k); lsSet(MODELSTORE,S.model); S.dwAvail=!!k; render(); toast(k?"API key saved in this browser":"Key cleared"); break; }
     case "clear-key": S.apiKey=""; lsDel(KEYSTORE); S.dwAvail=false; render(); toast("API key removed"); break;
     case "dw-close": if(S.dw.ctl) S.dw.ctl.abort(); S.dw.open=false; render(); break;
